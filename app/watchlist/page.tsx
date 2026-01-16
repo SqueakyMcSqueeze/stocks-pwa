@@ -13,7 +13,10 @@ function uid() {
 }
 
 async function fetchQuote(symbol: string): Promise<Quote> {
-  const r = await fetch(`/api/finnhub/quote?symbol=${encodeURIComponent(symbol)}`);
+  // ✅ Force no-cache + cache-buster (important on iOS + Vercel)
+  const r = await fetch(`/api/finnhub/quote?symbol=${encodeURIComponent(symbol)}&t=${Date.now()}`, {
+    cache: "no-store",
+  });
   if (!r.ok) throw new Error("Quote failed");
   return r.json();
 }
@@ -206,6 +209,30 @@ export default function WatchlistPage() {
 
     refreshQuotes(true);
 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemsLoaded, priceLog !== null, safeItems.length]);
+
+  // ✅ iPhone PWA reliability: refresh while open + on resume
+  useEffect(() => {
+    if (!itemsLoaded) return;
+    if (priceLog === null) return;
+    if (safeItems.length === 0) return;
+
+    const intervalId = window.setInterval(() => refreshQuotes(true), 30_000);
+
+    const onFocus = () => refreshQuotes(true);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refreshQuotes(true);
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemsLoaded, priceLog !== null, safeItems.length]);
 
