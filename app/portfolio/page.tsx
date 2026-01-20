@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
 
-type Item = { id: string; symbol: string; name: string; shares: number };
+type Item = { id: string; symbol: string; name: string; industry: string; shares: number };
 type Quote = { c?: number; dp?: number };
 type RangePreset = "ALL" | "30D" | "90D" | "180D" | "365D";
 type PriceLog = Record<string, Record<string, number>>; // symbol -> { YYYY-MM-DD: price }
@@ -13,11 +13,25 @@ function uid() {
 }
 
 async function fetchQuote(symbol: string): Promise<Quote> {
+  // Force no-cache + cache-buster (important on iOS + Vercel)
   const r = await fetch(`/api/finnhub/quote?symbol=${encodeURIComponent(symbol)}&t=${Date.now()}`, {
     cache: "no-store",
   });
   if (!r.ok) throw new Error("Quote failed");
   return r.json();
+}
+
+async function fetchIndustry(symbol: string): Promise<string> {
+  try {
+    const r = await fetch(`/api/finnhub/profile?symbol=${encodeURIComponent(symbol)}&t=${Date.now()}`, {
+      cache: "no-store",
+    });
+    if (!r.ok) return "";
+    const j = await r.json();
+    return (j?.industry ?? "") as string;
+  } catch {
+    return "";
+  }
 }
 
 function dayKey(d = new Date()) {
@@ -39,7 +53,9 @@ function loadPriceLog(): PriceLog {
 function savePriceLog(log: PriceLog) {
   try {
     localStorage.setItem("price_log", JSON.stringify(log));
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 function alreadyLoggedToday(log: PriceLog, symbols: string[]) {
@@ -84,7 +100,17 @@ export default function PortfolioPage() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem("portfolio");
-      setItems(raw ? JSON.parse(raw) : []);
+      const parsed = raw ? (JSON.parse(raw) as any[]) : [];
+      // Backwards-compatible: ensure industry exists
+      setItems(
+        (parsed ?? []).map((x) => ({
+          id: String(x.id),
+          symbol: String(x.symbol),
+          name: String(x.name ?? x.symbol),
+          industry: String(x.industry ?? ""),
+          shares: Number(x.shares ?? 1),
+        }))
+      );
     } catch {
       setItems([]);
     }
@@ -121,15 +147,19 @@ export default function PortfolioPage() {
 
   const safeItems = items ?? [];
   const safeLog: PriceLog = priceLog ?? {};
+  const ready = itemsLoaded && priceLog !== null;
 
-  function add() {
+  async function add() {
     if (!itemsLoaded) return;
 
     const s = symbol.trim().toUpperCase();
     const sh = Number(shares.replace(",", "."));
     if (!s || !Number.isFinite(sh) || sh <= 0) return;
 
-    setItems([{ id: uid(), symbol: s, name: name.trim() || s, shares: sh }, ...safeItems]);
+    // ✅ auto-fill industry from server (Finnhub profile2)
+    const industry = await fetchIndustry(s);
+
+    setItems([{ id: uid(), symbol: s, name: name.trim() || s, industry, shares: sh }, ...safeItems]);
     setSymbol("");
     setName("");
     setShares("1");
@@ -140,9 +170,14 @@ export default function PortfolioPage() {
     setItems(safeItems.filter((x) => x.id !== id));
   }
 
-  // ✅ Reset bad history from earlier (if you ever had normalized logs)
   function resetChartHistory() {
     if (!itemsLoaded) return;
+
+    const ok = window.confirm(
+      "Reset chart history?\n\nThis will delete ALL stored price history for ALL stocks (price_log)."
+    );
+    if (!ok) return;
+
     localStorage.removeItem("price_log");
     setPriceLog({});
   }
@@ -156,11 +191,11 @@ export default function PortfolioPage() {
       const next: PriceLog = { ...prev };
 
       for (const it of safeItems) {
-        const p = q[it.symbol]?.c; // ✅ raw price
+        const p = q[it.symbol]?.c; // raw price
         if (p == null) continue;
 
         if (!next[it.symbol]) next[it.symbol] = {};
-        next[it.symbol][k] = p; // ✅ store raw price
+        next[it.symbol][k] = p;
       }
       return next;
     });
@@ -234,7 +269,6 @@ export default function PortfolioPage() {
   }, [itemsLoaded, priceLog !== null, safeItems.length]);
 
   const lastUpdated = quotesTs > 0 ? new Date(quotesTs).toLocaleString() : "—";
-  const ready = itemsLoaded && priceLog !== null;
 
   const seriesBySymbol = useMemo(() => {
     const out: Record<string, Array<[number, number]>> = {};
@@ -244,6 +278,7 @@ export default function PortfolioPage() {
     return out;
   }, [safeItems, safeLog, range]);
 
+  // Overlay chart: raw logged prices per stock
   const overlaySeries = useMemo(() => {
     return safeItems
       .map((it) => {
@@ -327,6 +362,7 @@ export default function PortfolioPage() {
               <tr style={{ textAlign: "left" }}>
                 <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Symbol</th>
                 <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Name</th>
+                <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Industry</th>
                 <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Shares</th>
                 <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Price</th>
                 <th style={{ borderBottom: "1px solid #ddd", padding: 6 }}>Day %</th>
@@ -342,6 +378,7 @@ export default function PortfolioPage() {
                   <tr key={it.id}>
                     <td style={{ padding: 6, fontWeight: 700 }}>{it.symbol}</td>
                     <td style={{ padding: 6 }}>{it.name}</td>
+                    <td style={{ padding: 6 }}>{it.industry || "—"}</td>
 
                     <td style={{ padding: 6 }}>
                       <input
