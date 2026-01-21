@@ -12,7 +12,25 @@ function uid() {
   return crypto.randomUUID();
 }
 
-async function fetchQuote(symbol: string): Promise<Quote> {
+// ✅ Normalize user input like "ASML nl" -> "ASML.AS" (Finnhub format)
+function normalizeSymbol(input: string) {
+  let s = (input ?? "").trim().toUpperCase();
+
+  // "ASML NL" -> "ASML.AS"
+  s = s.replace(/\s+NL$/i, ".AS");
+
+  // "ASML:NL" or "ASML-NL" -> "ASML.AS"
+  s = s.replace(/[:\-]NL$/i, ".AS");
+
+  // remove spaces inside
+  s = s.replace(/\s+/g, "");
+
+  return s;
+}
+
+async function fetchQuote(symbolInput: string): Promise<Quote> {
+  const symbol = normalizeSymbol(symbolInput);
+
   // Force no-cache + cache-buster (important on iOS + Vercel)
   const r = await fetch(`/api/finnhub/quote?symbol=${encodeURIComponent(symbol)}&t=${Date.now()}`, {
     cache: "no-store",
@@ -21,7 +39,9 @@ async function fetchQuote(symbol: string): Promise<Quote> {
   return r.json();
 }
 
-async function fetchIndustry(symbol: string): Promise<string> {
+async function fetchIndustry(symbolInput: string): Promise<string> {
+  const symbol = normalizeSymbol(symbolInput);
+
   try {
     const r = await fetch(`/api/finnhub/profile?symbol=${encodeURIComponent(symbol)}&t=${Date.now()}`, {
       cache: "no-store",
@@ -53,9 +73,7 @@ function loadPriceLog(): PriceLog {
 function savePriceLog(log: PriceLog) {
   try {
     localStorage.setItem("price_log", JSON.stringify(log));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function alreadyLoggedToday(log: PriceLog, symbols: string[]) {
@@ -101,7 +119,6 @@ export default function PortfolioPage() {
     try {
       const raw = localStorage.getItem("portfolio");
       const parsed = raw ? (JSON.parse(raw) as any[]) : [];
-      // Backwards-compatible: ensure industry exists
       setItems(
         (parsed ?? []).map((x) => ({
           id: String(x.id),
@@ -152,11 +169,11 @@ export default function PortfolioPage() {
   async function add() {
     if (!itemsLoaded) return;
 
-    const s = symbol.trim().toUpperCase();
+    // ✅ normalize user input like "ASML nl"
+    const s = normalizeSymbol(symbol);
     const sh = Number(shares.replace(",", "."));
     if (!s || !Number.isFinite(sh) || sh <= 0) return;
 
-    // ✅ auto-fill industry from server (Finnhub profile2)
     const industry = await fetchIndustry(s);
 
     setItems([{ id: uid(), symbol: s, name: name.trim() || s, industry, shares: sh }, ...safeItems]);
@@ -182,6 +199,7 @@ export default function PortfolioPage() {
     setPriceLog({});
   }
 
+  // ✅ log prices using normalized symbol key (consistent!)
   function logTodayFromQuotes(q: Record<string, Quote | null>) {
     if (!itemsLoaded) return;
 
@@ -191,11 +209,12 @@ export default function PortfolioPage() {
       const next: PriceLog = { ...prev };
 
       for (const it of safeItems) {
-        const p = q[it.symbol]?.c; // raw price
+        const sym = normalizeSymbol(it.symbol);
+        const p = q[sym]?.c;
         if (p == null) continue;
 
-        if (!next[it.symbol]) next[it.symbol] = {};
-        next[it.symbol][k] = p;
+        if (!next[sym]) next[sym] = {};
+        next[sym][k] = p;
       }
       return next;
     });
@@ -210,11 +229,13 @@ export default function PortfolioPage() {
     setLoadingPrices(true);
     const next: Record<string, Quote | null> = {};
 
+    // ✅ fetch using normalized keys so quotes map matches logTodayFromQuotes
     for (const it of safeItems) {
+      const sym = normalizeSymbol(it.symbol);
       try {
-        next[it.symbol] = await fetchQuote(it.symbol);
+        next[sym] = await fetchQuote(sym);
       } catch {
-        next[it.symbol] = null;
+        next[sym] = null;
       }
     }
 
@@ -238,7 +259,7 @@ export default function PortfolioPage() {
     if (priceLog === null) return;
     if (safeItems.length === 0) return;
 
-    const symbols = safeItems.map((x) => x.symbol);
+    const symbols = safeItems.map((x) => normalizeSymbol(x.symbol));
     if (alreadyLoggedToday(safeLog, symbols)) return;
 
     refreshQuotes(true);
@@ -273,18 +294,19 @@ export default function PortfolioPage() {
   const seriesBySymbol = useMemo(() => {
     const out: Record<string, Array<[number, number]>> = {};
     for (const it of safeItems) {
-      out[it.symbol] = filterByRange(toSeriesFromLog(safeLog, it.symbol), range);
+      const sym = normalizeSymbol(it.symbol);
+      out[sym] = filterByRange(toSeriesFromLog(safeLog, sym), range);
     }
     return out;
   }, [safeItems, safeLog, range]);
 
-  // Overlay chart: raw logged prices per stock
   const overlaySeries = useMemo(() => {
     return safeItems
       .map((it) => {
-        const arr = seriesBySymbol[it.symbol] ?? [];
+        const sym = normalizeSymbol(it.symbol);
+        const arr = seriesBySymbol[sym] ?? [];
         if (arr.length < 2) return null;
-        return { name: it.symbol, data: arr };
+        return { name: sym, data: arr };
       })
       .filter(Boolean) as Array<{ name: string; data: Array<[number, number]> }>;
   }, [safeItems, seriesBySymbol]);
@@ -314,7 +336,7 @@ export default function PortfolioPage() {
       ) : (
         <>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-            <input placeholder="Symbol (e.g. AAPL)" value={symbol} onChange={(e) => setSymbol(e.target.value)} />
+            <input placeholder='Symbol (e.g. "ASML nl" or ASML.AS)' value={symbol} onChange={(e) => setSymbol(e.target.value)} />
             <input placeholder="Name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
             <input placeholder="Shares" value={shares} onChange={(e) => setShares(e.target.value)} />
             <button onClick={add}>Add</button>
@@ -372,11 +394,12 @@ export default function PortfolioPage() {
 
             <tbody>
               {safeItems.map((it) => {
-                const q = quotes[it.symbol];
+                const sym = normalizeSymbol(it.symbol);
+                const q = quotes[sym];
 
                 return (
                   <tr key={it.id}>
-                    <td style={{ padding: 6, fontWeight: 700 }}>{it.symbol}</td>
+                    <td style={{ padding: 6, fontWeight: 700 }}>{sym}</td>
                     <td style={{ padding: 6 }}>{it.name}</td>
                     <td style={{ padding: 6 }}>{it.industry || "—"}</td>
 
